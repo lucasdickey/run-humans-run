@@ -2,6 +2,10 @@
 
 A standalone Pac-Man/Snake hybrid survival game built with Next.js and React.
 
+<img width="789" alt="image" src="https://github.com/user-attachments/assets/3e4ccccf-b43d-4490-985d-e24b7ef5af12" />
+<img width="721" alt="image" src="https://github.com/user-attachments/assets/3d74e3b7-cb55-49cf-9b60-9907c219341b" />
+
+
 ## 🎮 Game Description
 
 Navigate through a maze as a human character, collecting UBI Credits while avoiding aggressive apes. Use power-ups to turn the tables and eat the apes instead!
