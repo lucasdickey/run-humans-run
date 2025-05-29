@@ -41,6 +41,9 @@ export default function RunHumansRun({
   const [internalGameWon, internalSetGameWon] = useState(false);
   const [internalTokensCollected, internalSetTokensCollected] = useState(0);
   const [showWinModal, setShowWinModal] = useState(false);
+  const [powerModeState, setPowerModeState] = useState(false);
+  const [powerModeTimerState, setPowerModeTimerState] = useState(0);
+  const [isPaused, setIsPaused] = useState(false);
 
   // Use the provided state handlers or fallback to internal ones
   const gameStarted = externalGameStarted !== undefined ? externalGameStarted : internalGameStarted;
@@ -58,6 +61,7 @@ export default function RunHumansRun({
 
   // Refs for tracking values that need to be accessed in event listeners
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
   const livesRef = useRef(3);
   const tokensCollectedRef = useRef(0);
   const gameOverRef = useRef(false);
@@ -97,10 +101,87 @@ export default function RunHumansRun({
       y: number;
       direction: { x: number; y: number };
     }> = [];
-    let powerMode = false;
-    let powerModeTimer = 0;
+    // let powerMode = false; // Replaced by powerModeState
+    // let powerModeTimer = 0; // Replaced by powerModeTimerState
     let gameLoopId: number;
-    let apeIntervalId: number | undefined;
+    const apeIntervalIdRef = useRef<number | undefined>(undefined); // Use const for ref
+    const intendedDirectionRef = useRef<{ x: number; y: number } | null>(null);
+
+    // Sound effects helper
+    const playSound = (type: 'token' | 'lifeLost' | 'eatApe' | 'gameStart') => {
+      if (!audioContextRef.current || audioContextRef.current.state === 'suspended') {
+        // Attempt to resume/create context if needed, though primary resume is on game start click
+        if (!audioContextRef.current) {
+          try {
+            audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+          } catch (e) {
+            console.error("Web Audio API is not supported in this browser", e);
+            return;
+          }
+        }
+        audioContextRef.current.resume().catch(e => console.error("AudioContext resume failed", e));
+      }
+      if (!audioContextRef.current || audioContextRef.current.state !== 'running') {
+        console.warn("AudioContext not running, cannot play sound.");
+        return;
+      }
+
+      const audioCtx = audioContextRef.current;
+      const oscillator = audioCtx.createOscillator();
+      const gainNode = audioCtx.createGain();
+      gainNode.connect(audioCtx.destination);
+      oscillator.connect(gainNode);
+
+      const now = audioCtx.currentTime;
+
+      switch (type) {
+        case 'token':
+          oscillator.type = 'triangle';
+          oscillator.frequency.setValueAtTime(880, now); // A5 note
+          gainNode.gain.setValueAtTime(0.3, now);
+          gainNode.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
+          oscillator.start(now);
+          oscillator.stop(now + 0.2);
+          break;
+        case 'lifeLost':
+          oscillator.type = 'sawtooth';
+          oscillator.frequency.setValueAtTime(330, now); // E4
+          oscillator.frequency.exponentialRampToValueAtTime(110, now + 0.5); // E3
+          gainNode.gain.setValueAtTime(0.4, now);
+          gainNode.gain.exponentialRampToValueAtTime(0.001, now + 0.5);
+          oscillator.start(now);
+          oscillator.stop(now + 0.5);
+          break;
+        case 'eatApe':
+          oscillator.type = 'square';
+          oscillator.frequency.setValueAtTime(440, now); // A4
+          gainNode.gain.setValueAtTime(0.35, now);
+          gainNode.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+          oscillator.start(now);
+          oscillator.stop(now + 0.15);
+          break;
+        case 'gameStart':
+          // A short ascending melody: C5, E5, G5
+          const startTime = now;
+          const noteDuration = 0.1;
+          const freqs = [523.25, 659.25, 783.99]; // C5, E5, G5
+          gainNode.gain.setValueAtTime(0.25, startTime);
+
+          freqs.forEach((freq, i) => {
+            const noteStartTime = startTime + i * noteDuration;
+            oscillator.frequency.setValueAtTime(freq, noteStartTime);
+            if (i === freqs.length -1) { // Last note
+                 gainNode.gain.setValueAtTime(0.25, noteStartTime);
+                 gainNode.gain.exponentialRampToValueAtTime(0.001, noteStartTime + noteDuration * 2);
+            }
+          });
+          oscillator.type = 'triangle';
+          oscillator.start(startTime);
+          oscillator.stop(startTime + freqs.length * noteDuration + noteDuration);
+          break;
+      }
+    };
+
 
     // Maze layout (1 = wall, 0 = path)
     const maze: number[][] = Array(GRID_HEIGHT)
@@ -165,8 +246,8 @@ export default function RunHumansRun({
           spawnApeInCorner();
         }
 
-        powerMode = false;
-        powerModeTimer = 0;
+        setPowerModeState(false);
+        setPowerModeTimerState(0);
         setTokensCollected(0);
         tokensCollectedRef.current = 0;
         gameOverRef.current = false;
@@ -376,12 +457,12 @@ export default function RunHumansRun({
 
           // In power mode, apes try to run away from player
           // Otherwise, they aggressively pursue the player
-          const targetX = powerMode
+          const targetX = powerModeState
             ? ape.x < player.x
               ? ape.x - 1
               : ape.x + 1
             : player.x;
-          const targetY = powerMode
+          const targetY = powerModeState
             ? ape.y < player.y
               ? ape.y - 1
               : ape.y + 1
@@ -409,7 +490,7 @@ export default function RunHumansRun({
                 const newY = ape.y + move.y;
 
                 // Calculate Manhattan distance to target
-                const distance = powerMode
+                const distance = powerModeState
                   ? -1 * (Math.abs(newX - targetX) + Math.abs(newY - targetY)) // Negative for fleeing
                   : Math.abs(newX - targetX) + Math.abs(newY - targetY); // Positive for chasing
 
@@ -444,10 +525,11 @@ export default function RunHumansRun({
 
           // Check if ape has collided with the player's head
           if (ape.x === player.x && ape.y === player.y) {
-            if (powerMode) {
+            if (powerModeState) {
               // Player eats ape when powered up
               const capturedApeIndex = i;
               apes.splice(capturedApeIndex, 1);
+              playSound('eatApe');
               setScore((prevScore) => prevScore + 10);
 
               // Remove two additional random apes if available
@@ -480,6 +562,9 @@ export default function RunHumansRun({
             } else {
               // Ape catches player
               const newLives = Math.max(0, livesRef.current - 1);
+              if (livesRef.current > newLives) { // Check if a life was actually lost
+                playSound('lifeLost');
+              }
               livesRef.current = newLives;
               setLives(newLives);
               if (newLives === 0) {
@@ -578,18 +663,39 @@ export default function RunHumansRun({
 
         // Draw player
         if (player) {
-          // Draw yellow face
-          ctx.beginPath();
-          ctx.arc(
-            player.x * GRID_SIZE + GRID_SIZE / 2,
-            player.y * GRID_SIZE + GRID_SIZE / 2,
-            GRID_SIZE / 2,
-            0,
-            Math.PI * 2
-          );
-          ctx.fillStyle = "#FFD600";
-          ctx.fill();
-          ctx.closePath();
+          const playerCenterX = player.x * GRID_SIZE + GRID_SIZE / 2;
+          const playerCenterY = player.y * GRID_SIZE + GRID_SIZE / 2;
+          const playerRadius = GRID_SIZE / 2;
+
+          if (powerModeState) {
+            // Power mode appearance
+            // Aura
+            ctx.beginPath();
+            ctx.arc(playerCenterX, playerCenterY, playerRadius + GRID_SIZE / 4, 0, Math.PI * 2);
+            ctx.fillStyle = "rgba(255, 255, 255, 0.3)"; // Semi-transparent white aura
+            ctx.fill();
+            ctx.closePath();
+            
+            ctx.beginPath();
+            ctx.arc(playerCenterX, playerCenterY, playerRadius + GRID_SIZE / 8, 0, Math.PI * 2);
+            ctx.fillStyle = "rgba(0, 255, 255, 0.5)"; // Semi-transparent cyan aura
+            ctx.fill();
+            ctx.closePath();
+
+            // Main face
+            ctx.beginPath();
+            ctx.arc(playerCenterX, playerCenterY, playerRadius, 0, Math.PI * 2);
+            ctx.fillStyle = "#00FFFF"; // Cyan face
+            ctx.fill();
+            ctx.closePath();
+          } else {
+            // Standard appearance
+            ctx.beginPath();
+            ctx.arc(playerCenterX, playerCenterY, playerRadius, 0, Math.PI * 2);
+            ctx.fillStyle = "#FFD600"; // Yellow face
+            ctx.fill();
+            ctx.closePath();
+          }
 
           // Draw eyes
           ctx.beginPath();
@@ -613,13 +719,7 @@ export default function RunHumansRun({
 
           // Draw smile
           ctx.beginPath();
-          ctx.arc(
-            player.x * GRID_SIZE + GRID_SIZE / 2,
-            player.y * GRID_SIZE + (GRID_SIZE * 2) / 3,
-            GRID_SIZE / 5,
-            0,
-            Math.PI
-          );
+          ctx.arc(playerCenterX, playerCenterY + GRID_SIZE / 6, playerRadius / 2.5, 0, Math.PI); // Adjusted smile position slightly
           ctx.lineWidth = 2;
           ctx.strokeStyle = "#222";
           ctx.stroke();
@@ -635,7 +735,7 @@ export default function RunHumansRun({
             const baseY = ape.y * GRID_SIZE;
 
             // Ape body
-            ctx.fillStyle = powerMode ? "#0000FF" : "#8B4513";
+            ctx.fillStyle = powerModeState ? "#0000FF" : "#8B4513";
             ctx.fillRect(baseX, baseY, GRID_SIZE, GRID_SIZE);
 
             // Ape ears
@@ -653,7 +753,7 @@ export default function RunHumansRun({
             );
 
             // Ape face
-            ctx.fillStyle = powerMode ? "#0000AA" : "#A0522D";
+            ctx.fillStyle = powerModeState ? "#0000AA" : "#A0522D";
             ctx.fillRect(
               baseX + GRID_SIZE / 4,
               baseY + GRID_SIZE / 2,
@@ -687,28 +787,7 @@ export default function RunHumansRun({
           });
         }
 
-        // Draw score and lives
-        ctx.fillStyle = "#FFFFFF";
-        ctx.font = "20px monospace";
-        ctx.textAlign = "left";
-        ctx.fillText(
-          `UBI CREDITS: ${tokensCollectedRef.current}/${TOKENS_TO_WIN}`,
-          10,
-          30
-        );
-
-        // Draw lives
-        ctx.fillText(`LIVES: ${livesRef.current}`, canvas.width - 150, 30);
-
-        // Draw power mode timer
-        if (powerMode) {
-          ctx.fillStyle = "#00FFFF";
-          ctx.fillText(
-            `POWER: ${Math.ceil(powerModeTimer / 30)}`,
-            canvas.width / 2 - 80,
-            30
-          );
-        }
+        // Score, lives, and power mode timer are now displayed via HTML elements
       } catch (error) {
         console.error("Error in draw:", error);
       }
@@ -764,6 +843,7 @@ export default function RunHumansRun({
             if (token && token.x === player.x && token.y === player.y) {
               // Token collection logic
               tokens.splice(i, 1);
+              playSound('token');
               player.tailLength += 1;
               tokensCollectedRef.current += 1;
               const newTokens = tokensCollectedRef.current;
@@ -799,8 +879,8 @@ export default function RunHumansRun({
               powerUp.active
             ) {
               powerUps.splice(i, 1);
-              powerMode = true;
-              powerModeTimer = 300; // 10 seconds at 30fps
+              setPowerModeState(true);
+              setPowerModeTimerState(300); // 10 seconds at 30fps
               setScore((prevScore) => prevScore + 5);
               placePowerUp();
             }
@@ -808,11 +888,15 @@ export default function RunHumansRun({
         }
 
         // Update power mode timer
-        if (powerMode) {
-          powerModeTimer--;
-          if (powerModeTimer <= 0) {
-            powerMode = false;
-          }
+        // Update power mode timer
+        if (powerModeState && !isPaused) { // Only decrement if not paused
+          setPowerModeTimerState(prev => {
+            if (prev <= 1) {
+              setPowerModeState(false);
+              return 0;
+            }
+            return prev - 1;
+          });
         }
       } catch (error) {
         console.error("Error in checkCollisions:", error);
@@ -836,6 +920,19 @@ export default function RunHumansRun({
             cancelAnimationFrame(gameLoopId);
           }
           gameLoopId = requestAnimationFrame(gameLoop);
+          return;
+        }
+
+        // Handle Pause Key -> Toggle isPaused state
+        if (e.code === "KeyP") {
+          if (gameStarted && !gameOverRef.current && !gameWonRef.current) {
+            setIsPaused(prevPaused => !prevPaused);
+          }
+          return; // Prevent other key actions when 'P' is pressed
+        }
+
+        // Ignore game input if paused, game over, or game won
+        if (isPaused || gameOverRef.current || gameWonRef.current) {
           return;
         }
 
@@ -877,6 +974,27 @@ export default function RunHumansRun({
     // Game loop
     const gameLoop = () => {
       try {
+        // Request next frame immediately
+        gameLoopId = requestAnimationFrame(gameLoop);
+
+        // Handle Paused State
+        if (isPaused) {
+          draw(); // Keep drawing the current state
+          // Display Paused Message
+          if (ctx && canvas) {
+            ctx.fillStyle = "rgba(0, 0, 0, 0.6)"; // Semi-transparent overlay
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = "#FFFF00"; // Yellow text
+            ctx.font = "bold 48px monospace";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText("PAUSED", canvas.width / 2, canvas.height / 2);
+            ctx.font = "bold 24px monospace";
+            ctx.fillText("Press P to Resume", canvas.width / 2, canvas.height / 2 + 40);
+          }
+          return; // Skip all game logic below if paused
+        }
+
         // Normal game over
         if (gameOverRef.current) {
           // Draw game over screen with overlay
@@ -926,37 +1044,51 @@ export default function RunHumansRun({
 
         // Check if game is won
         if (gameWonRef.current) {
-          // Just draw the current state and stop game logic
-          draw();
-          gameLoopId = requestAnimationFrame(gameLoop);
-          return;
+          draw(); // Keep drawing the win state
+          return; // Stop game logic
         }
 
+        // Only run game logic if not paused (already handled by the check at the top of gameLoop)
         // Increment frame counter
         frameCounter++;
 
-        // Only move apes on certain frames based on APE_SPEED
-        if (frameCounter % APE_SPEED === 0 && !gameOverRef.current && !gameWonRef.current) {
+        // Only move apes on certain frames
+        if (frameCounter % APE_SPEED === 0) { // No need to check gameOver/gameWon here due to earlier returns
           moveApes();
         }
 
-        // Only move player on certain frames based on PLAYER_SPEED
-        if (frameCounter % PLAYER_SPEED === 0 && !gameOverRef.current && !gameWonRef.current) {
-          checkCollisions();
+        // Only move player on certain frames
+        if (frameCounter % PLAYER_SPEED === 0) {
+          // Apply intended direction from touch controls
+          if (intendedDirectionRef.current) {
+            const newDir = intendedDirectionRef.current;
+            if (newDir.x !== 0 && player.direction.x === 0) { // Moving horizontally, was vertical or still
+              player.direction = { x: newDir.x, y: 0 };
+            } else if (newDir.y !== 0 && player.direction.y === 0) { // Moving vertically, was horizontal or still
+              player.direction = { x: 0, y: newDir.y };
+            }
+            intendedDirectionRef.current = null; // Consume the input
+          }
+          checkCollisions(); // This also updates powerModeTimerState (which checks isPaused internally)
         }
 
-        draw();
-        gameLoopId = requestAnimationFrame(gameLoop);
+        draw(); // Draw the new game state
       } catch (error) {
         console.error("Error in game loop:", error);
-        // Continue the game - do NOT reset anything!
-        gameLoopId = requestAnimationFrame(gameLoop);
+        // If an error occurs, we still want to try to keep the loop going if possible,
+        // but requestAnimationFrame is already at the top.
       }
     };
 
     // --- Ape spawn interval ---
-    apeIntervalId = window.setInterval(() => {
-      if (apes.length < 8) {
+    // Clear previous interval if any (e.g., if gameStarted changes or on hot reload)
+    if (apeIntervalIdRef.current !== undefined) {
+      clearInterval(apeIntervalIdRef.current);
+    }
+    apeIntervalIdRef.current = window.setInterval(() => {
+      // Check isPaused directly from component state.
+      // Also ensure game is active and not over/won.
+      if (!isPaused && gameStarted && !gameOverRef.current && !gameWonRef.current && apes.length < 8) {
         spawnNewApes(1);
       }
     }, 10000);
@@ -965,18 +1097,21 @@ export default function RunHumansRun({
     initGame();
 
     // Start game loop
-    gameLoopId = requestAnimationFrame(gameLoop);
+    gameLoopId = requestAnimationFrame(gameLoop); // Initial call to start the loop
 
     // Add event listeners
     window.addEventListener("keydown", handleKeyDown);
 
-    // Cleanup
+    // Cleanup for the main game useEffect
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
       cancelAnimationFrame(gameLoopId);
-      if (apeIntervalId) clearInterval(apeIntervalId);
+      if (apeIntervalIdRef.current !== undefined) {
+        clearInterval(apeIntervalIdRef.current);
+        apeIntervalIdRef.current = undefined; // Clear the ref on unmount/game stop
+      }
     };
-  }, [gameStarted]);
+  }, [gameStarted]); // isPaused is NOT in dependency array; interval callback and gameLoop check it directly.
 
   // Keep refs in sync with state for display
   useEffect(() => {
@@ -1047,7 +1182,20 @@ export default function RunHumansRun({
                 </p>
               </div>
               <button
-                onClick={() => setGameStarted(true)}
+                onClick={() => {
+                  if (!audioContextRef.current) {
+                    try {
+                      audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+                    } catch (e) {
+                      console.error("Web Audio API is not supported in this browser", e);
+                    }
+                  }
+                  if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
+                    audioContextRef.current.resume().catch(e => console.error("AudioContext resume failed on start", e));
+                  }
+                  setGameStarted(true);
+                  playSound('gameStart');
+                }}
                 className="px-8 py-4 mt-16 bg-green-500 text-white font-bold rounded shadow-lg"
               >
                 START GAME
@@ -1083,6 +1231,81 @@ export default function RunHumansRun({
               }}
               tabIndex={0}
             />
+            {/* Pause Button */}
+            <button
+              onClick={() => {
+                if (gameStarted && !gameOver && !gameWon) {
+                  setIsPaused(!isPaused);
+                }
+              }}
+              className="absolute top-14 right-4 text-white hover:text-gray-300 text-sm font-bold z-50 bg-black bg-opacity-60 rounded px-3 py-2"
+              title={isPaused ? "Resume Game (P)" : "Pause Game (P)"}
+              disabled={!gameStarted || gameOver || gameWon}
+            >
+              {isPaused ? "RESUME (P)" : "PAUSE (P)"}
+            </button>
+            {/* Status Display */}
+            <div
+              className="absolute top-2 left-2 text-white p-2 rounded"
+              style={{ backgroundColor: "rgba(0, 0, 0, 0.5)" }}
+            >
+              <p className="font-mono text-lg">UBI Credits: {tokensCollected}/3</p>
+            </div>
+            <div
+              className="absolute top-2 right-2 text-white p-2 rounded"
+              style={{ backgroundColor: "rgba(0, 0, 0, 0.5)" }}
+            >
+              <p className="font-mono text-lg">Lives: {lives}</p>
+            </div>
+            {powerModeState && (
+              <div
+                className="absolute bottom-2 left-1/2 -translate-x-1/2 text-cyan-400 p-2 rounded"
+                style={{ backgroundColor: "rgba(0, 0, 0, 0.5)" }}
+              >
+                <p className="font-mono text-lg">Power: {Math.ceil(powerModeTimerState / 30)}s</p>
+              </div>
+            )}
+            {/* Pause Overlay - This is now drawn on canvas, but an HTML overlay is also an option if preferred */}
+            
+            {/* Touch Controls */}
+            {gameStarted && !gameOver && !gameWon && !isPaused && (
+              <div className="absolute bottom-8 left-1/2 -translate-x-1/2 flex flex-col items-center space-y-1 md:hidden"> {/* md:hidden to hide on larger screens */}
+                {/* Up Button */}
+                <button
+                  onTouchStart={(e) => { e.preventDefault(); intendedDirectionRef.current = { x: 0, y: -1 }; }}
+                  onMouseDown={(e) => { e.preventDefault(); intendedDirectionRef.current = { x: 0, y: -1 }; }}
+                  className="bg-gray-600 bg-opacity-70 text-white text-2xl font-bold w-16 h-12 rounded-md flex items-center justify-center active:bg-gray-500"
+                >
+                  ↑
+                </button>
+                <div className="flex space-x-1">
+                  {/* Left Button */}
+                  <button
+                    onTouchStart={(e) => { e.preventDefault(); intendedDirectionRef.current = { x: -1, y: 0 }; }}
+                    onMouseDown={(e) => { e.preventDefault(); intendedDirectionRef.current = { x: -1, y: 0 }; }}
+                    className="bg-gray-600 bg-opacity-70 text-white text-2xl font-bold w-16 h-12 rounded-md flex items-center justify-center active:bg-gray-500"
+                  >
+                    ←
+                  </button>
+                  {/* Down Button */}
+                  <button
+                    onTouchStart={(e) => { e.preventDefault(); intendedDirectionRef.current = { x: 0, y: 1 }; }}
+                    onMouseDown={(e) => { e.preventDefault(); intendedDirectionRef.current = { x: 0, y: 1 }; }}
+                    className="bg-gray-600 bg-opacity-70 text-white text-2xl font-bold w-16 h-12 rounded-md flex items-center justify-center active:bg-gray-500"
+                  >
+                    ↓
+                  </button>
+                  {/* Right Button */}
+                  <button
+                    onTouchStart={(e) => { e.preventDefault(); intendedDirectionRef.current = { x: 1, y: 0 }; }}
+                    onMouseDown={(e) => { e.preventDefault(); intendedDirectionRef.current = { x: 1, y: 0 }; }}
+                    className="bg-gray-600 bg-opacity-70 text-white text-2xl font-bold w-16 h-12 rounded-md flex items-center justify-center active:bg-gray-500"
+                  >
+                    →
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -1096,7 +1319,7 @@ export default function RunHumansRun({
             
             <button
               onClick={restartGame}
-              className="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-6 rounded transition-colors"
+              className="bg-green-500 hover:bg-green-600 text-white font-bold text-lg py-3 px-8 rounded shadow-lg transition-colors"
             >
               PLAY AGAIN
             </button>
