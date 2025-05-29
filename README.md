@@ -1,6 +1,6 @@
 # Run, Human, Run! 🏃‍♂️
 
-A standalone Pac-Man/Snake hybrid survival game built with Next.js and React.
+A standalone Pac-Man/Snake hybrid survival game from the team at APES ON KEYS ([www.a-ok.shop](https://www.a-ok.shop)) who built this game into their app to offer winners a discount to use at checkout.
 
 <img width="789" alt="image" src="https://github.com/user-attachments/assets/3e4ccccf-b43d-4490-985d-e24b7ef5af12" />
 <img width="721" alt="image" src="https://github.com/user-attachments/assets/3d74e3b7-cb55-49cf-9b60-9907c219341b" />
